@@ -1,0 +1,31 @@
+<mujoco model="scenario">
+  <option timestep="0.00050000000000000001" integrator="implicitfast"/>
+  <visual>
+    <global azimuth="150" elevation="-20"/>
+    <headlight ambient="0.29999999999999999 0.29999999999999999 0.29999999999999999" diffuse="0.59999999999999998 0.59999999999999998 0.59999999999999998" specular="0 0 0"/>
+    <rgba haze="0.14999999999999999 0.25 0.34999999999999998 1"/>
+  </visual>
+  <default>
+    <default class="scene/"/>
+  </default>
+  <asset>
+    <texture name="skybox" builtin="gradient" rgb1="0.29999999999999999 0.5 0.69999999999999996" rgb2="0 0 0" width="512" height="3072"/>
+    <texture name="grouplane" type="2d" builtin="checker" rgb1="0.20000000000000001 0.29999999999999999 0.40000000000000002" rgb2="0.10000000000000001 0.20000000000000001 0.29999999999999999" mark="edge" markrgb="0.80000000000000004 0.80000000000000004 0.80000000000000004" width="300" height="300"/>
+    <material name="groundplane_mat" class="scene/" texture="grouplane" texrepeat="5 5" texuniform="true" reflectance="0.20000000000000001"/>
+  </asset>
+  <worldbody>
+    <light name="global_light" class="scene/" directional="false" pos="0 0 3" dir="0 0 -1"/>
+    <body name="world_body" pos="0 0 0" euler="0 0 0">
+      <geom name="world_geom" class="scene/" type="box" conaffinity="15" condim="3" size="0.1 0.1 0.1" pos ="0 0.7 -0.05" material="groundplane_mat"/>
+      <body name="floor" pos="0 0 -0.1" euler="0 0 0">
+        <joint name="floor_control" class="scene/" type="hinge" axis="0 1 0" armature="0" damping="0" frictionloss="0"/>
+        <geom name="floor_geom" class="scene/" type="box" conaffinity="15" condim="3" size="3 0.6 0.05" material="groundplane_mat"/>
+      </body>      
+    </body>
+  </worldbody>
+
+<actuator>
+  <position name="floor_pos" class="scene/" kp="100000" joint="floor_control"/>
+  <velocity name="floor_vel" class="scene/" kv="100000" joint="floor_control"/>
+</actuator>
+</mujoco>

@@ -1,0 +1,45 @@
+<mujoco model="robot">
+  <default>
+    <default class="robot/"/>
+    </default>
+  <worldbody>
+    <body name="body_chassis_" pos="0 0 0.58250000000000002" euler="0 0 0">
+      <camera name="camera_track_chassis_" class="robot/" mode="track" pos="0 -3 1" zaxis="0 -1 0.5"/>
+      <geom name="geom_chassis_" class="robot/" type="box" size="0.22 0.16 0.10000000000000001" mass="10"/>
+      <site name="right_site_chassis_" class="robot/" size="9.9999999999999995e-07 9.9999999999999995e-07 9.9999999999999995e-07" pos="0 -0.16 -0.59999999999999998"/>
+      <body pos="0 -0.16 -0.59999999999999998" name="right_tire/">
+        <body name="right_tire/body_tire_right">
+          <geom name="right_tire/geom_tire_right" class="robot/" type="cylinder" condim="6" priority="1" size="0.082500000000000004 0.029999999999999999" friction="0.095000000000000001 0.0050000000000000001 0.0001" mass="1" pos="0 -0.029999999999999999 0" euler="90 0 0"/>
+          <joint name="right_tire/joint_tire_right" class="robot/" type="hinge" axis="0 1 0" damping="0.050000000000000003"/>
+        </body>
+      </body>
+      <site name="left_site_chassis_" class="robot/" size="9.9999999999999995e-07 9.9999999999999995e-07 9.9999999999999995e-07" pos="0 0.16 -0.59999999999999998" euler="0 0 180"/>
+      <body pos="0 0.16 -0.59999999999999998" euler="0 0 180" name="left_tire/">
+        <body name="left_tire/body_tire_left">
+          <geom name="left_tire/geom_tire_left" class="robot/" type="cylinder" condim="6" priority="1" size="0.082500000000000004 0.029999999999999999" friction="0.095000000000000001 0.0050000000000000001 0.0001" mass="1" pos="0 -0.029999999999999999 0" euler="90 0 0"/>
+          <joint name="left_tire/joint_tire_left" class="robot/" type="hinge" axis="0 1 0" damping="0.050000000000000003"/>
+        </body>
+      </body>
+      <freejoint name="free_floating_chassis_"/>
+      <site name="imu" class="robot/" size="9.9999999999999995e-07 9.9999999999999995e-07 9.9999999999999995e-07" pos="0 0 0"/>
+    </body>
+    <light name="spotlight_0" class="robot/" mode="targetbodycom" target="body_chassis_" pos="0.23000000000000001 0.17000000000000001 0.11"/>
+    <light name="spotlight_1" class="robot/" mode="targetbodycom" target="body_chassis_" pos="0.23000000000000001 -0.17000000000000001 0.11"/>
+    <light name="spotlight_2" class="robot/" mode="targetbodycom" target="body_chassis_" pos="-0.23000000000000001 0.17000000000000001 0.11"/>
+    <light name="spotlight_3" class="robot/" mode="targetbodycom" target="body_chassis_" pos="-0.23000000000000001 -0.17000000000000001 0.11"/>
+  </worldbody>
+  <actuator>
+    <velocity name="left_tire/act" class="robot/" joint="left_tire/joint_tire_left" kv="10"/>
+    <velocity name="right_tire/act" class="robot/" joint="right_tire/joint_tire_right" kv="10"/>
+  </actuator>
+  <sensor>
+    <gyro name="_gyro" site="imu"/>
+    <accelerometer name="_accelerometer" site="imu"/>
+    <magnetometer name="_magnetometer" site="imu"/>
+    <framequat name="_orientation" objtype="site" objname="imu"/>
+    <jointpos name="left_tire/pos" noise="0.080000000000000002" joint="left_tire/joint_tire_left"/>
+    <jointvel name="left_tire/vel" noise="0.080000000000000002" joint="left_tire/joint_tire_left"/>
+    <jointpos name="right_tire/pos" noise="0.080000000000000002" joint="right_tire/joint_tire_right"/>
+    <jointvel name="right_tire/vel" noise="0.080000000000000002" joint="right_tire/joint_tire_right"/>
+  </sensor>
+</mujoco>

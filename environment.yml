@@ -1,0 +1,22 @@
+name: twlr-rl
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy = 1.26
+  - scipy = 1.11
+  - matplotlib = 3.8
+  - spatialmath-python = 1.1.8
+  - pip
+  - pip:
+    - mujoco == 3.2.2
+    - mujoco-mjx
+    - brax
+    - dm_control
+    - gymnasium
+    - ipykernel
+    - imageio
+    - flax
+    - control
+    - modern_robotics
+    - mediapy
