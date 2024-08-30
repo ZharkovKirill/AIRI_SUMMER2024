@@ -1,0 +1,15 @@
+
+numpy == 1.26
+scipy == 1.11
+matplotlib == 3.8
+spatialmath-python == 1.1.8
+mujoco == 3.2.2
+mujoco-mjx
+dm_control
+gymnasium
+flax
+jax[cuda12]
+control
+modern_robotics
+mediapy
+sympy

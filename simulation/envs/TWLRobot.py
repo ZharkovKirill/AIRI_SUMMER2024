@@ -1,4 +1,6 @@
+
 from copy import copy
+from math import exp
 import pathlib
 import sys
 import os
@@ -39,6 +41,12 @@ DEFAULT_CAMERA_CONFIG = {
 
 SEED = 0xEBAB
 
+
+def standardize_vector(vector, mean, std):
+    return (vector - mean) / std
+
+def exp_func(x):
+    return np.exp(-np.linalg.norm(x)**2)
 @dataclass
 class ControlConfig:
     stiffness: np.ndarray = field(default_factory=np.ndarray)#np.array([80, 80, 80, 80, 20, 20], dtype=np.float64)
@@ -265,8 +273,8 @@ class TWLRobot(MujocoEnv):
             "last_action": 6,
         }
         self.action_space = Box(
-            low=np.array([-np.pi / 2, -np.pi / 2, -np.pi / 2, -np.pi / 2, -7, -7]),
-            high=np.array([np.pi / 2, np.pi / 2, np.pi / 2, np.pi / 2, 7, 7]),
+            low=np.array([-np.pi / 2, -np.pi / 2, -np.pi / 2, -np.pi / 2, -50, -50]),
+            high=np.array([np.pi / 2, np.pi / 2, np.pi / 2, np.pi / 2, 50, 50]),
             shape=(6,),
             dtype=np.float64,
         )
@@ -296,8 +304,9 @@ class TWLRobot(MujocoEnv):
         
         self._obs_noise = obs_noise
         self.seed = seed
-        np.random.seed(seed)
+        self.rng = np.random.default_rng(seed)
         self.goal  = np.array([1, 0, 0])
+        self.steps_done = 0 
 
     @property
     def dt(self):
@@ -331,7 +340,6 @@ class TWLRobot(MujocoEnv):
             <= max_z
         )
         #print(self.data.xpos[self.model.body(BodyNames.chassis.value).id][2])
-        # print(z_health)
         pitch = R.from_quat(self.data.xquat[self.model.body(BodyNames.chassis.value).id]).as_euler("xyz")[1]
         pitch_health = min_pitch <= pitch <= max_pitch
         return pitch_health and z_health
@@ -400,7 +408,7 @@ class TWLRobot(MujocoEnv):
                 self.last_actions,
             )
         )
-        obs_vec += np.random.normal(0,self._obs_noise, obs_vec.size)
+        obs_vec += self.rng.normal(0,self._obs_noise, obs_vec.size)
 
         return np.array(obs_vec, dtype=np.float32)
 
@@ -476,7 +484,7 @@ class TWLRobot(MujocoEnv):
         )
 
     def step(self, action):
-
+        self.steps_done += 1
         torques = self._compute_torques(action)
         left_conf = torques[:2]
         right_conf = torques[2:4]
@@ -495,25 +503,29 @@ class TWLRobot(MujocoEnv):
         
 
         observation = self._get_obs()
-        self.last_qvel = observation[4:10]
+        # self.last_qvel = observation[4:10]
+        self.last_qvel = np.zeros(6)
 
         reward, reward_info = self.calculate_reward()
 
         priveleged_state, priveleged_info = self._get_priveleged_info()
         info = {
-            "qpos": observation[0:4],
-            "qvel": observation[4:10],
-            "ang_vel_in_base": observation[10:13],
-            "direction_to_goal":observation[13:15],
-            "height_command": observation[15],
-            "projected_gravity": observation[15:19],
-            "last_actions": observation[19:],
+            # "qpos": observation[0:4],
+            # "qvel": observation[4:10],
+            # "ang_vel_in_base": observation[10:13],
+            # "direction_to_goal":observation[13:15],
+            # "height_command": observation[15],
+            # "projected_gravity": observation[15:19],
+            # "last_actions": observation[19:],
             **priveleged_info,
             **reward_info,
         }
 
         time_cond = self.termination_time >= self.data.time
         terminated = not time_cond or not self.is_healthy
+
+        if terminated:
+            self.reset()
         
         if self.render_mode == "human":
             self.render()
@@ -533,12 +545,12 @@ class TWLRobot(MujocoEnv):
         robot_quat = self.data.xquat[self.model.body(BodyNames.chassis.value).id]
         robot_orient = R.from_quat(robot_quat).as_matrix()
 
-        weights = np.array([3, 1, 1, 0])
+        weights = np.array([10, 1, 1, 0.1])
 
         err = robot_pos - self.goal
 
         if self.data.time > self.termination_time - self.time_first_reward:
-            r_pos = 1 / (1 + np.linalg.norm(err))
+            r_pos = 1 / T_r * 1 / (1 + np.linalg.norm(err))
         else:
             r_pos = 0
             
@@ -549,7 +561,7 @@ class TWLRobot(MujocoEnv):
                 np.inner(robot_vel, -err) / np.linalg.norm(robot_vel) / np.linalg.norm(-err)
             )
 
-        if np.linalg.norm(robot_vel) < 0.1 and np.linalg.norm(err) > 1.5:
+        if np.linalg.norm(robot_vel) < 0.1 and np.linalg.norm(err) > 0.5:
             r_stall = -1
         else:
             r_stall = 0
@@ -558,9 +570,7 @@ class TWLRobot(MujocoEnv):
             r_face_goal = -np.trace(robot_orient.T @ self.goal_orientation)
         else:
             r_face_goal = 0
-        
-        r_face_goal = 0
-        
+
         rew = np.array([r_pos, r_posbias, r_stall, r_face_goal])
 
         rew_info = {
@@ -570,19 +580,18 @@ class TWLRobot(MujocoEnv):
             "reward_face_goal": r_face_goal,
         }
 
-        sum_rew = np.sum(np.inner(weights, rew))
-        norm_rew = sum_rew / np.sum(weights)
-        norm_rew = norm_rew / (self.termination_time / self.dt)
-        return norm_rew, rew_info
+        return np.sum(np.inner(weights, rew)), rew_info
 
     def _compute_torques(self, action):
         actions_scaled = action * np.array(self.control_cfg.action_scale)
-        obs = self._get_obs()
+        # obs = self._get_obs()
         
-        qpos = obs[:4]
-        qvel = obs[4:10]
+        # qpos = obs[:4]
+        # qvel = obs[4:10]
         
-        qpos = np.hstack((qpos, [0,0]))
+        # qpos = np.hstack((qpos, [0,0]))
+        qpos = np.zeros(6)
+        qvel = np.zeros(6)
         
         torques = []
         for type_act, a, curr_pos, curr_vel, last_vel, defaul_pos, stiff, damp, scl in zip(
@@ -622,26 +631,26 @@ class TWLRobot(MujocoEnv):
         bound_pos_z = [-0.1, 0.1]
         orienration_goal_z = [-0.3, 0.3]
         
-        x_goal = np.random.uniform(bound_pos_x[0], bound_pos_x[1])
-        y_goal = np.random.uniform(bound_pos_y[0], bound_pos_y[1])
-        ort_goal_z = np.random.uniform(orienration_goal_z[0], orienration_goal_z[1])
+        x_goal = self.rng.uniform(bound_pos_x[0], bound_pos_x[1])
+        y_goal = self.rng.uniform(bound_pos_y[0], bound_pos_y[1])
+        ort_goal_z = self.rng.uniform(orienration_goal_z[0], orienration_goal_z[1])
         
-        height = 0.6481854249492381 + np.random.uniform(bound_pos_z[0], bound_pos_z[1])
+        height = 0.6481854249492381 + self.rng.uniform(bound_pos_z[0], bound_pos_z[1])
         
         self.goal_orientation = R.from_euler("xyz", [0, 0, ort_goal_z]).as_matrix()
         self.goal = np.array([x_goal, y_goal, height])
         
     def reset(self, seed=0xEBAB):
-
+        self.steps_done = 0
         self._reset_simulation()
         qpos = INIT_POS
-        # qpos[:2] += np.random.uniform(-0.1, 0.1, size = 2)
+        # qpos[:2] += self.rng.uniform(-0.1, 0.1, size = 2)
         qvel = np.zeros(self.model.nv)
-        # qvel[:2] = np.random.normal(qvel[:2], 0.1, size=2)
-        # qvel[6:8] = np.random.normal(qvel[6:8], 0.01, size=2)
-        # qvel[8] = np.random.normal(qvel[8], 0.05)
-        # qvel[9:11] = np.random.normal(qvel[9:11], 0.01, size=2)
-        # qvel[11] = np.random.normal(qvel[11], 0.05)
+        # qvel[:2] = self.rng.normal(qvel[:2], 0.1, size=2)
+        # qvel[6:8] = self.rng.normal(qvel[6:8], 0.01, size=2)
+        # qvel[8] = self.rng.normal(qvel[8], 0.05)
+        # qvel[9:11] = self.rng.normal(qvel[9:11], 0.01, size=2)
+        # qvel[11] = self.rng.normal(qvel[11], 0.05)
 
         self.set_state(qpos, qvel)
 
@@ -651,6 +660,8 @@ class TWLRobot(MujocoEnv):
 
 
 class TWLRobotDisc(TWLRobot):
+    regulaze = (np.array([-0.08538231, -0.16970922,  0.14940762]),
+    np.array([0.30912793, 0.4157188 , 2.33317212]))
     path_to_model: str
     metadata = {
         "render_modes": [
@@ -669,7 +680,7 @@ class TWLRobotDisc(TWLRobot):
         ctrl_cost_weight=1,
         contact_cost_weight=1,
         contact_cost_range=(-1, 1),
-        healthy_z_range=(0.3, 1.0),
+        healthy_z_range=(0.35, 1.5),
         healthu_pitch_range=(-np.pi / 3, np.pi / 3),
         obs_noise = 0.05,
         seed = SEED,
@@ -692,470 +703,170 @@ class TWLRobotDisc(TWLRobot):
             default_camera_config,
         )
         
+        self.observation_space = Box(
+            low = np.array([-5, -5, -5, -5, -5, -5, -5]),
+            high = np.array([5, 5, 5, 5, 5, 5, 5]),
+            shape = (7,))
+        # self.action_space = Box(
+        #     low=np.array([-1, -1]),
+        #     high=np.array([1, 1]),
+        #     shape=(2,),
+        #     dtype=np.float64,
+        # )
+        scl = 0.017453
+        self.action_space = MultiDiscrete([17, 17, 17, 17, 5, 5])
+        legs_state = {0: -15 * scl, 
+                      1: -13 * scl, 
+                      2: -11 * scl, 
+                      3: -9 * scl, 
+                      4: -7 * scl, 
+                      5: -5 * scl, 
+                      6: -3 * scl, 
+                      7: -1 * scl, 
+                      8: 0, 
+                      9: 1 * scl, 
+                      10: 3 * scl, 
+                      11: 5 * scl, 
+                      12: 7 * scl, 
+                      13: 9 * scl, 
+                      14: 11 * scl, 
+                      15: 13 * scl, 
+                      16: 15 * scl}
+        self.look_table = [ 
+                           legs_state, 
+                           legs_state, 
+                           legs_state, 
+                           legs_state, 
+                           {0:-5, 1:-1, 2:0, 3:1, 4:5}, 
+                           {0:-5, 1:-1, 2:0, 3:1, 4:5}
+                           ]
+        self.last_action = np.zeros(6)
+
+        self._x_vel_bound = np.arange(-0.5, 0.5, 0.1)
+        #self._y_vel_bound = [-0.5, 0.5]
+        self._yaw_vel_bound = np.arange(-0.5, 0.5, 0.1)
+        #self.speeds = self._sample_speed()
+        self.speeds = [0, 0]
+        self.rng = np.random.default_rng(seed)
+
+    
+    def _sample_speed(self):
+        x_vel = self.rng.uniform(-0.5, 0.5)
+        #y_vel = self.rng.uniform(self._y_vel_bound[0], self._y_vel_bound[1])
+        yaw_vel = self.rng.uniform(-0.5, 0.5)
+        # print(x_vel, yaw_vel)
+        return [x_vel, yaw_vel]
         
-        self.action_space = Discrete(11)
-        divisor = 7
-        self.look_table = {0:-40, 1:-30, 2:-20, 3:-10, 4:-5, 5: 0, 6:5, 7:10, 8:20, 9:30, 10:40}
-        self.look_table = {key: value / divisor for key, value in self.look_table .items()}
+    
+    def calculate_reward(self):
+        des_height = 0.55 #INIT_POS[2] + 0.3
+        height = self.data.qpos[2]
+        joints_states = self.data.qpos[6:10]
         
+        obs = self._get_obs()
+        dx = obs[0]
+        dyaw = obs[2]
+        
+        rew_1 = exp_func(height - des_height)
+        rew_2 = exp_func(self.speeds[0] - dx)
+        rew_3 = 0#exp_func(self.speeds[1] - dy)
+        rew_4 = exp_func(self.speeds[1] - dyaw)
+        rew_5 = exp_func(np.zeros(4)-joints_states)
+        rew_6 = exp_func(min(self.steps_done-1000, 0))
+        
+        weights = np.array([1, 1.5, 1.5, 1.5, 1, 1])
+        
+        return np.inner(weights, [rew_1, rew_2, rew_3, rew_4, rew_5, rew_6])/2000, {"height": height} #np.inner(weights, [rew_1, rew_2]), {"height": rew_1, "x_vel": rew_2}
+    
+    def _get_obs(self):
+        angles = R.from_quat(self.data.qpos[3:7]).as_euler("xyz")
+
+        pitch = angles[1]
+        yaw = angles[0]
+        
+        d_pitch = self.data.sensor("_gyro").data[1]
+        d_yaw = self.data.sensor("_gyro").data[2]
+        
+        
+        x_vel = self.data.qvel[0]
+        y_vel = self.data.qvel[1]
+
+        x_vel = np.linalg.norm([x_vel, y_vel])*np.sign(np.arctan2(y_vel, x_vel)*yaw)
+
+        obs_vec = np.array([x_vel, yaw, d_yaw, pitch, d_pitch, self.speeds[0], self.speeds[1]])
+        #print(obs_vec)
+        #reg_obs_vec = standardize_vector(obs_vec, self.regulaze[0], self.regulaze[1])
+        return obs_vec
     
     def _compute_torques(self, action):
         full_action = np.zeros(6)
+        #print(action)
+        #action = int(action)
+        #scl=10
+        # wheels
         
-        full_action[5] = self.look_table[action]
-        full_action[4] = self.look_table[action]
+        
+        # legs
+        # full_action[0] = self.last_action[0] + self.look_table[2][int(action[2])]
+        # full_action[1] = self.last_action[1] + self.look_table[3][int(action[3])]
+        # full_action[2] = self.last_action[2] + self.look_table[4][int(action[4])]
+        # full_action[3] = self.last_action[3] + self.look_table[5][int(action[5])]
+
+        full_action[0] = self.look_table[0][int(action[0])]
+        full_action[1] = self.look_table[1][int(action[1])]
+        full_action[2] = self.look_table[2][int(action[2])]
+        full_action[3] = self.look_table[3][int(action[3])]
+        full_action[5] = self.look_table[4][int(action[4])]
+        full_action[4] = self.look_table[5][int(action[5])]
+        self.last_action = full_action
         # print(full_action)
         return super()._compute_torques(full_action)
 
+    def reset(self, seed = None):
+        if seed is not None:
+            self.rng = np.random.default_rng(seed)
+        # self.speeds = self._sample_speed()
+        #print(self.speeds)
+        self.steps_done = 0
+        self._reset_simulation()
+        qpos = INIT_POS
+        qpos[:2] = self.rng.normal(qpos[:2], 0.02, size=2)
+        qpos[7:] = self.rng.normal(qpos[7:], 0.02, size=6)
+        qvel = np.zeros(self.model.nv)
+        qvel[:2] = self.rng.normal(qvel[:2], 0.01, size=2)
+        qvel[6:8] = self.rng.normal(qvel[6:8], 0.01, size=2)
+        qvel[8] = self.rng.normal(qvel[8], 0.05)
+        qvel[9:11] = self.rng.normal(qvel[9:11], 0.01, size=2)
+        qvel[11] = self.rng.normal(qvel[11], 0.05)
 
+        self.set_state(qpos, qvel)
+        #print(qpos, qvel)
 
-
-class TWLRReduccedObs(TWLRobot):
- 
-        def __init__(self,
-            path_to_model: str,
-            frame_skip: int,
-            termination_time: float,
-            time_first_reward: float,
-            control_cfg: ControlDiscConfig = ControlDiscConfig(),
-            ctrl_cost_weight=1,
-            contact_cost_weight=1,
-            contact_cost_range=(-1, 1),
-            healthy_z_range=(0.3, 1.0),
-            healthu_pitch_range=(-np.pi / 4, np.pi / 4),
-            obs_noise = 0.05,
-            seed = SEED,
-            default_camera_config: dict[str, dict[float, int]] = DEFAULT_CAMERA_CONFIG,
-            **kwargs):
-            
-            super().__init__(
-                path_to_model,
-                frame_skip,
-                termination_time,
-                time_first_reward,
-                control_cfg,
-                ctrl_cost_weight,
-                contact_cost_weight,
-                contact_cost_range,
-                healthy_z_range,
-                healthu_pitch_range,
-                obs_noise,
-                seed,
-                default_camera_config,
-            )
-            
-            self.observation_space = Box(
-                low=-np.inf,
-                high=np.inf,
-                shape=(
-                    #4  # qpos
-                    #+ 6  # qvel
-                      1  # ang_vel_in_base
-                    + 2  # direction_to_goal
-                    #+ 1  # height_command
-                    + 3  # gravity projection
-                    + 6,  # last_action
-                ),
-                dtype=np.float32,
-            )
-            self.prev_pitch = 0
-            self.observation_structure = {
-            "qpos": 4,
-            "qvel": 6,
-            "ang_vel_in_base": 3,
-            "direction_to_goal": 2,
-            "height_command": 1,
-            "gravity_projection": 1,
-            "last_action": 6,
-            }
-
-            self.action_space = Discrete(11)
-            divisor = 10
-            self.look_table = {0:-40, 1:-30, 2:-20, 3:-10, 4:-5, 5: 0, 6:5, 7:10, 8:20, 9:30, 10:40}
-            self.look_table = {key: value / divisor for key, value in self.look_table .items()}
-            
-            self.mean_obs_values = np.zeros(self.observation_space.shape[0])
-            self.std_values = np.ones(self.observation_space.shape[0]) / 2
-            self.mean_obs_values = np.array([-0.26539966, 0.999923, 5.500572e-05, -0.008134802, 
-                                    -8.663328e-06, -0.9297388, 9.232647e-06, -5.617875e-05, 
-                                    -0.00012885177, 0.00010613444, 7.460367e-06, 5.7265108e-05])
-            self.std_values = np.array([3.3733978, 0.04997032, 0.04996355, 0.36088163, 
-                               0.050061267, 0.101029925, 0.050018523, 0.050023824, 
-                               0.0499741, 0.05006457, 0.049995065, 0.049999516])
-        def _get_obs(self):
-            """
-            Returns the observation vector for the environment.
-
-            Returns:
-                np.ndarray: The observation vector, which includes the joint positions and velocities,
-                angular velocity in the base, direction to the goal, height command, projected gravity,
-                and last actions.
-            """
-            # Rest of the code...
-
-            base_pose = self.data.xpos[self.model.body(BodyNames.chassis.value).id]
-            
-            pitch = R.from_quat(self.data.xquat[self.model.body(BodyNames.chassis.value).id]).as_euler("xyz")[1]
-            vel_pitch = self.prev_pitch - pitch
-            self.prev_pitch = pitch
-
-            left_upper_qpos = self.data.joint(JointNames.left_upper_joint.value).qpos
-            left_upper_qvel = self.data.joint(JointNames.left_upper_joint.value).qvel
-            left_lower_qpos = self.data.joint(JointNames.left_lower_joint.value).qpos
-            left_lower_qvel = self.data.joint(JointNames.left_lower_joint.value).qvel
-
-            right_upper_qpos = self.data.joint(JointNames.right_upper_joint.value).qpos
-            right_upper_qvel = self.data.joint(JointNames.right_upper_joint.value).qvel
-            right_lower_qpos = self.data.joint(JointNames.right_lower_joint.value).qpos
-            right_lower_qvel = self.data.joint(JointNames.right_lower_joint.value).qvel
-
-            r_wheel_qvel = self.data.joint(JointNames.right_wheel.value).qvel
-            l_wheel_qvel = self.data.joint(JointNames.left_wheel.value).qvel
-
-            qpos = np.hstack(
-                (left_upper_qpos, left_lower_qpos, right_upper_qpos, right_lower_qpos)
-            )
-            qvel = np.hstack(
-                (
-                    left_upper_qvel,
-                    left_lower_qvel,
-                    right_upper_qvel,
-                    right_lower_qvel,
-                    l_wheel_qvel,
-                    r_wheel_qvel,
-                )
-            )
-
-            ang_vel_in_base = self.data.sensor("_gyro").data
-
-            xy_pos_chassis = self.data.xpos[self.model.body(BodyNames.chassis.value).id][:2]
-            direction_to_goal = self.goal[:2] - xy_pos_chassis
-            direction_to_goal /= np.linalg.norm(direction_to_goal)
-
-            height_command = self.goal[2]
-
-            gravity_ground = np.array([0, 0, 1])
-
-            R_wb = R.from_quat(
-                self.data.xquat[self.model.body(BodyNames.chassis.value).id]
-            ).as_matrix()
-
-            projected_gravity = R_wb.T @ gravity_ground
-            obs_vec = np.concatenate(
-                (
-                    #qpos,
-                    #qvel,
-                    [ang_vel_in_base[1]],
-                    direction_to_goal,
-                    #np.array([height_command]),
-                    projected_gravity,
-                    self.last_actions,
-                )
-            )
-            #obs_vec += np.random.normal(0,self._obs_noise, obs_vec.size)
-            obs_vec = np.array(obs_vec, dtype=np.float32)
-            obs_vec_norm = self.normalize_obs(obs_vec)
-            obs_vec_norm += np.random.normal(0,self._obs_noise, obs_vec.size)
-            return np.array(obs_vec_norm, dtype=np.float32)
-
-        def normalize_obs(self, raw_obs):
-            norm_obs = raw_obs - self.mean_obs_values
-            norm_obs = norm_obs / (self.std_values * 2.0)
-            return norm_obs
-
-        def step(self, action):
-            torques = self._compute_torques(action)
-            left_conf = torques[:2]
-            right_conf = torques[2:4]
-            dr_wheel = torques[4]
-            dl_wheel = torques[5]
-
-            torques = self.robot_context.get_control_vector(
-                left_conf, dl_wheel, right_conf, dr_wheel
-            )
-            self.do_simulation(torques, self.frame_skip)
-            # self.data.qpos[:7] = INIT_POS[:7]
-            # self.data.qvel[:6] = np.zeros(6)
-            # self.data.qacc[:6] = np.zeros(6)
-            # self.data.xpos[1] = INIT_POS[:3]
-            # self.data.xquat[1] = INIT_POS[3:7]
-            
-
-            observation = self._get_obs()
-            # self.last_qvel = observation[4:10]
-            self.last_qvel = np.zeros(6)
-
-            reward, reward_info = self.calculate_reward()
-
-            priveleged_state, priveleged_info = self._get_priveleged_info()
-            info = {
-                "ang_vel": observation[0],
-                # "qvel": observation[4:10],
-                # "ang_vel_in_base": observation[10:13],
-                "direction_to_goal":observation[1:4],
-                # "height_command": observation[15],
-                "projected_gravity": observation[4:8],
-                # "last_actions": observation[19:],
-                **priveleged_info,
-                **reward_info,
-            }
-
-            time_cond = self.termination_time >= self.data.time
-            terminated = not time_cond or not self.is_healthy
-            
-            if self.render_mode == "human":
-                self.render()
-            return observation, reward, terminated, False, info
+        obs = self._get_obs()
+        info = {"q_pos": qpos, 'q_vel': qvel}
+        return (obs, info)
         
-        def _compute_torques(self, action):
-            full_action = np.zeros(6)
-            
-            full_action[5] = self.look_table[action]
-            full_action[4] = self.look_table[action]
-            # print(full_action)
-            return super()._compute_torques(full_action)
 
+    @property
+    def is_healthy(self):
+        """
+        Check if the robot is in a healthy state.
+        Returns:
+            bool: True if the robot is healthy, False otherwise.
+        """
 
-class TWLRReduccedObsDiscete(TWLRobot):
- 
-        def __init__(self,
-            path_to_model: str,
-            frame_skip: int,
-            termination_time: float,
-            time_first_reward: float,
-            control_cfg: ControlDiscConfig = ControlDiscConfig(),
-            ctrl_cost_weight=1,
-            contact_cost_weight=1,
-            contact_cost_range=(-1, 1),
-            healthy_z_range=(0.3, 1.0),
-            healthu_pitch_range=(-np.pi / 3, np.pi / 3),
-            obs_noise = 0.005,
-            seed = SEED,
-            default_camera_config: dict[str, dict[float, int]] = DEFAULT_CAMERA_CONFIG,
-            **kwargs):
-            
-            super().__init__(
-                path_to_model,
-                frame_skip,
-                termination_time,
-                time_first_reward,
-                control_cfg,
-                ctrl_cost_weight,
-                contact_cost_weight,
-                contact_cost_range,
-                healthy_z_range,
-                healthu_pitch_range,
-                obs_noise,
-                seed,
-                default_camera_config,
-            )
-            
-            self.observation_space = Box(
-                low=-np.inf,
-                high=np.inf,
-                shape=(
-                      1  # ang_vel_in_base
-                    + 2  # direction_to_goal
-                    + 1  # distance_to_goal
-                    + 3  # gravity projection
-                    + 4, # leg_state
-                ),
-                dtype=np.float32,
-            )
-            self.prev_pitch = 0
- 
-
-            self.action_space = MultiDiscrete([5, 5, 3])
-            
-            self.look_table_wheel = {0: 0, 1: -0.5, 2: 0.5, 3: 1.5, 4: -1.5}
-            self.look_table_j = {0: 0, 1: np.deg2rad(0.1), 2: -np.deg2rad(0.1)}
-            
-            self.mean_obs_values = np.zeros(sum(self.observation_space.shape))
-            self.std_values = np.ones(sum(self.observation_space.shape)) / 2
-            # self.mean_obs_values = np.array([-0.26539966, 0.0, 0.0, 0.0, 
-            #                         -8.663328e-06, -0.9297388, 9.232647e-06, -5.617875e-05, 
-            #                         -0.00012885177, 0.00010613444, 7.460367e-06, 5.7265108e-05])
-            # self.std_values = np.array([3.3733978, 1.0, 1.0, 1.0, 
-            #                    0.050061267, 0.101029925, 0.050018523, 0.050023824, 
-            #                    0.0499741, 0.05006457, 0.049995065, 0.049999516])
-            self.current_angles_offset = np.zeros(4)
-
-        def _get_obs(self):
-            """
-            Returns the observation vector for the environment.
-
-            Returns:
-                np.ndarray: The observation vector, which includes the joint positions and velocities,
-                angular velocity in the base, direction to the goal, height command, projected gravity,
-                and last actions.
-            """
-            # Rest of the code...
-
-            base_pose = self.data.xpos[self.model.body(BodyNames.chassis.value).id]
-            
-            pitch = R.from_quat(self.data.xquat[self.model.body(BodyNames.chassis.value).id]).as_euler("xyz")[1]
-            vel_pitch = self.prev_pitch - pitch
-            self.prev_pitch = pitch
-
-            left_upper_qpos = self.data.joint(JointNames.left_upper_joint.value).qpos
-            left_upper_qvel = self.data.joint(JointNames.left_upper_joint.value).qvel
-            left_lower_qpos = self.data.joint(JointNames.left_lower_joint.value).qpos
-            left_lower_qvel = self.data.joint(JointNames.left_lower_joint.value).qvel
-
-            right_upper_qpos = self.data.joint(JointNames.right_upper_joint.value).qpos
-            right_upper_qvel = self.data.joint(JointNames.right_upper_joint.value).qvel
-            right_lower_qpos = self.data.joint(JointNames.right_lower_joint.value).qpos
-            right_lower_qvel = self.data.joint(JointNames.right_lower_joint.value).qvel
-
-            r_wheel_qvel = self.data.joint(JointNames.right_wheel.value).qvel
-            l_wheel_qvel = self.data.joint(JointNames.left_wheel.value).qvel
-
-            qpos = np.hstack(
-                (left_upper_qpos, left_lower_qpos, right_upper_qpos, right_lower_qpos)
-            )
-            qvel = np.hstack(
-                (
-                    left_upper_qvel,
-                    left_lower_qvel,
-                    right_upper_qvel,
-                    right_lower_qvel,
-                    l_wheel_qvel,
-                    r_wheel_qvel,
-                )
-            )
-
-            ang_vel_in_base = self.data.sensor("_gyro").data
-
-            xy_pos_chassis = self.data.xpos[self.model.body(BodyNames.chassis.value).id][:2]
-            direction_to_goal = self.goal[:2] - xy_pos_chassis
-            direction_to_goal /= np.linalg.norm(direction_to_goal)
-
-            height_command = self.goal[2]
-
-            gravity_ground = np.array([0, 0, 1])
-
-            R_wb = R.from_quat(
-                self.data.xquat[self.model.body(BodyNames.chassis.value).id]
-            ).as_matrix()
-            dist_xy_to_goal = np.linalg.norm(direction_to_goal)
-            projected_gravity = R_wb.T @ gravity_ground
-            obs_vec = np.concatenate(
-                (
-                    [ang_vel_in_base[1]],
-                    direction_to_goal,
-                    [dist_xy_to_goal],
-                    projected_gravity,
-                    self.current_angles_offset,
-                    
-                )
-            )
-            #obs_vec += np.random.normal(0,self._obs_noise, obs_vec.size)
-            obs_vec = np.array(obs_vec, dtype=np.float32)
-            obs_vec_norm = self.normalize_obs(obs_vec)
-            obs_vec_norm += np.random.normal(0,self._obs_noise, obs_vec.size)
-            return np.array(obs_vec_norm, dtype=np.float32)
-
-        def normalize_obs(self, raw_obs):
-            norm_obs = raw_obs - self.mean_obs_values
-            norm_obs = norm_obs / (self.std_values * 2.0)
-            return norm_obs
-
-        def step(self, action):
-            torques = self._compute_torques(action)
-            left_conf = torques[:2]
-            right_conf = torques[2:4]
-            dr_wheel = torques[4]
-            dl_wheel = torques[5]
-
-            torques = self.robot_context.get_control_vector(
-                left_conf, dl_wheel, right_conf, dr_wheel
-            )
-            self.do_simulation(torques, self.frame_skip)
-            # self.data.qpos[:7] = INIT_POS[:7]
-            # self.data.qvel[:6] = np.zeros(6)
-            # self.data.qacc[:6] = np.zeros(6)
-            # self.data.xpos[1] = INIT_POS[:3]
-            # self.data.xquat[1] = INIT_POS[3:7]
-            
-
-            observation = self._get_obs()
-            # self.last_qvel = observation[4:10]
-            self.last_qvel = np.zeros(6)
-
-            reward, reward_info = self.calculate_reward()
-
-            priveleged_state, priveleged_info = self._get_priveleged_info()
-            info = {
-                "ang_vel": observation[0],
-                "direction_to_goal":observation[1:3],
-                "distance_to_goal": observation[4],
-                "projected_gravity": observation[5:8],
-                "last_actions": observation[9:13],
-                **priveleged_info,
-                **reward_info,
-            }
-
-            time_cond = self.termination_time >= self.data.time
-            terminated = not time_cond or not self.is_healthy
-            
-            if self.render_mode == "human":
-                self.render()
-                goal_err = np.linalg.norm(info["direction_to_goal"])
-                #print(f"Goal error {goal_err.round(3)}")
-            return observation, reward, terminated, False, info
-        
-        def _compute_torques(self, action):
-            full_action = np.zeros(6)
-            wheel_1_abs = self.look_table_wheel[action[0]]
-            wheel_2_abs = self.look_table_wheel[action[1]]
-            joint_all_inc = self.look_table_j[action[2]]
-            
-            self.current_angles_offset += np.ones(4) * joint_all_inc 
-            
-            full_action[0] = self.current_angles_offset[0]*0.1
-            full_action[1] = self.current_angles_offset[1]
-            full_action[2] = self.current_angles_offset[2]*0.1
-            full_action[3] = self.current_angles_offset[3]
-            
-            full_action[4] = wheel_1_abs
-            full_action[5] = wheel_2_abs
-            # print(full_action)
-            return super()._compute_torques(full_action)
-        
-        def reset(self, seed=0xAB0BA):
-            if seed != 0xAB0BA:
-                np.random.seed(seed)
-
-            self._reset_simulation()
-            qpos = INIT_POS
-            # seed_old = np.random.seed()
-            # seed_old += seed
-            # np.random.seed(seed_old)
-            #np.random.seed(seed)
-            qpos[0] += np.random.uniform(-0.01, 0.01)
-            # qpos[:2] += np.random.uniform(-0.1, 0.1, size = 2)
-            # qpos[:1] += np.random.uniform(-0.1, 0.1, size = 2)
-            qvel = np.zeros(self.model.nv)
-            # seed_old = np.random.seed()
-            # seed_old += seed
-            #np.random.seed(seed_old)
-            # qvel[:2] = np.random.normal(qvel[:2], 0.1, size=2)
-            # qvel[:2] = np.random.normal(qvel[:2], 0.1, size=2)
-            # qvel[0] = np.random.normal(qvel[0], 2, size=1)
-            qvel[0] = np.random.uniform(-0.1, 0.1, size=1)
-            # qvel[6:8] = np.random.normal(qvel[6:8], 0.01, size=2)
-            # qvel[8] = np.random.normal(qvel[8], 2)
-            qvel[8] = np.random.uniform(-0.02, 0.02)
-            # qvel[9:11] = np.random.normal(qvel[9:11], 0.01, size=2)
-            qvel[11] = np.random.uniform(-0.02, 0.02)
-
-            self.set_state(qpos, qvel)
-
-            obs = self._get_obs()
-            info = {"q_pos": qpos, 'q_vel': qvel}
-            return (obs, info)
-
-
+        min_z, max_z = self._healthy_z_range
+        min_pitch, max_pitch = self._healthy_pitch_range
+        z_health = (
+            min_z
+            <= self.data.xpos[self.model.body(BodyNames.chassis.value).id][2]
+            <= max_z
+        )
+        #print(self.data.xpos[self.model.body(BodyNames.chassis.value).id][2])
+        pitch = R.from_quat(self.data.xquat[self.model.body(BodyNames.chassis.value).id]).as_euler("xyz")[1]
+        pitch_health = min_pitch <= pitch <= max_pitch
+        pose = np.abs(self.data.qpos[0])<5
+        return pitch_health and z_health and pose
 
 if __name__ == "__main__":
     import numpy as np
